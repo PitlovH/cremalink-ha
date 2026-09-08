@@ -17,7 +17,7 @@ SCAN_INTERVAL_SLOW = timedelta(seconds=30)
 class CremalinkCoordinator(DataUpdateCoordinator):
     """Class to manage fetching data from the Cremalink device."""
 
-    def __init__(self, hass: HomeAssistant, device: Device):
+    def __init__(self, hass: HomeAssistant, device: Device, connection_type: str, dsn: str, map_path: str, token_file: str = None):
         """Initialize the coordinator.
 
         Args:
@@ -32,6 +32,10 @@ class CremalinkCoordinator(DataUpdateCoordinator):
             update_interval=SCAN_INTERVAL_FAST,
         )
         self.device = device
+        self.connection_type = connection_type
+        self.dsn = dsn
+        self.map_path = map_path
+        self.token_file = token_file
 
     async def _async_update_data(self):
         """Fetch data from the device.
@@ -42,6 +46,10 @@ class CremalinkCoordinator(DataUpdateCoordinator):
         Raises:
             UpdateFailed: If there is an error communicating with the device.
         """
+        import requests
+        from cremalink import Client
+        from homeassistant.exceptions import ConfigEntryAuthFailed
+        
         try:
             data = await self.hass.async_add_executor_job(self.device.get_monitor)
 
@@ -53,5 +61,20 @@ class CremalinkCoordinator(DataUpdateCoordinator):
                     self.update_interval = SCAN_INTERVAL_FAST
 
             return data
+        except requests.exceptions.HTTPError as err:
+            if getattr(err, "response", None) and err.response.status_code == 401 and self.connection_type == "cloud":
+                _LOGGER.info("Access token expired, attempting to refresh...")
+                try:
+                    def _refresh_device():
+                        client = Client(self.token_file)
+                        return client.get_device(self.dsn, self.map_path)
+                    
+                    self.device = await self.hass.async_add_executor_job(_refresh_device)
+                    # Retry once
+                    data = await self.hass.async_add_executor_job(self.device.get_monitor)
+                    return data
+                except Exception as refresh_err:
+                    raise ConfigEntryAuthFailed(f"Token refresh failed: {refresh_err}") from refresh_err
+            raise UpdateFailed(f"Error communicating with device: {err}") from err
         except Exception as err:
             raise UpdateFailed(f"Error communicating with device: {err}") from err

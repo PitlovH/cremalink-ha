@@ -91,7 +91,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as e:
         raise ConfigEntryNotReady(f"Could not connect to Cremalink device: {e}") from e
 
-    coordinator = CremalinkCoordinator(hass, device)
+    coordinator = CremalinkCoordinator(
+        hass, 
+        device,
+        connection_type=connection_type,
+        dsn=dsn,
+        map_path=str(map_path),
+        token_file=entry.data.get(CONF_TOKEN_FILE)
+    )
     await coordinator.async_config_entry_first_refresh()
 
     hass.data.setdefault(DOMAIN, {})
