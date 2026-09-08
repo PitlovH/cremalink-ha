@@ -18,9 +18,11 @@
       },
       "cloud_auth": {
         "title": "Cloud Authentication",
-        "description": "Enter your refresh token to authenticate with the cloud service.",
+        "description": "Enter your De'Longhi email and password, or provide a refresh token directly to authenticate with the cloud service.",
         "data": {
-          "refresh_token": "Refresh Token"
+          "email": "Email",
+          "password": "Password",
+          "refresh_token": "Refresh Token (Optional)"
         }
       },
       "cloud_device": {
@@ -45,7 +47,7 @@
     },
     "error": {
       "cannot_connect": "Could not connect to server. Is the URL correct and the server running?",
-      "auth_failed": "Authentication failed. Please check your refresh token.",
+      "auth_failed": "Authentication failed. Please check your email, password or refresh token.",
       "no_devices": "No devices found on this account.",
       "unknown": "Unknown error occurred"
     },

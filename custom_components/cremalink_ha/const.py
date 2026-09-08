@@ -10,6 +10,8 @@ CONF_DEVICE_IP = "device_ip"
 CONF_DEVICE_MAP = "device_map"
 
 CONF_CONNECTION_TYPE = "connection_type"
+CONF_EMAIL = "email"
+CONF_PASSWORD = "password"
 CONF_REFRESH_TOKEN = "refresh_token"
 CONF_TOKEN_FILE = "token_file"
 

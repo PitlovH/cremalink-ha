@@ -57,6 +57,110 @@ def get_map_data(hass: HomeAssistant, map_name: str) -> dict:
         except Exception:
             return {}
 
+def authenticate_with_email(email: str, password: str) -> str:
+    """Authenticate with Gigya/Ayla using email and password to get a refresh token (OIDC flow)."""
+    import requests
+    import base64
+    from datetime import datetime
+    import urllib.parse
+    import json
+    from cremalink.resources.api_config import load_api_config
+
+    api_conf = load_api_config()
+    gigya_api = api_conf.get("GIGYA", {})
+    ayla_api = api_conf.get("AYLA", {})
+
+    API_KEY = gigya_api.get("API_KEY")
+    CLIENT_ID = gigya_api.get("CLIENT_ID")
+    CLIENT_SECRET = gigya_api.get("CLIENT_SECRET")
+    SDK_BUILD = gigya_api.get("SDK_BUILD", 16650)
+    APP_ID = ayla_api.get("APP_ID")
+    APP_SECRET = ayla_api.get("APP_SECRET")
+    
+    AUTHORIZATION_HEADER = "Basic " + base64.b64encode(f"{CLIENT_ID}:{CLIENT_SECRET}".encode()).decode()
+    BROWSER_USER_AGENT = "DeLonghiComfort/5.1.1"
+
+    def get_query_param(url, param):
+        return urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get(param, [None])[0]
+
+    auth_response = requests.get(
+        f"https://fidm.eu1.gigya.com/oidc/op/v1.0/{API_KEY}/authorize",
+        headers={"User-Agent": BROWSER_USER_AGENT},
+        params={"client_id": CLIENT_ID, "response_type": "code", "redirect_uri": "https://google.it",
+                "scope": "openid email profile UID comfort en alexa", "nonce": str(int(datetime.now().timestamp()))},
+        allow_redirects=False,
+    )
+    context = get_query_param(auth_response.headers["Location"], "context")
+
+    gigya_session_response = requests.get(
+        f"https://socialize.eu1.gigya.com/socialize.getIDs",
+        headers={"User-Agent": BROWSER_USER_AGENT},
+        params={"APIKey": API_KEY, "includeTicket": True, "pageURL": "https://aylaopenid.delonghigroup.com/",
+                "sdk": "js_latest", "sdkBuild": SDK_BUILD, "format": "json"},
+    ).json()
+    ucid, gmid, gmid_ticket = gigya_session_response["ucid"], gigya_session_response["gmid"], gigya_session_response["gmidTicket"]
+
+    login_response = requests.post(
+        "https://accounts.eu1.gigya.com/accounts.login",
+        headers={"User-Agent": BROWSER_USER_AGENT},
+        data={"loginID": email, "password": password, "sessionExpiration": 7884009, "targetEnv": "jssdk",
+              "include": "profile,data,emails,subscriptions,preferences", "includeUserInfo": True,
+              "loginMode": "standard", "APIKey": API_KEY, "source": "showScreenSet", "sdk": "js_latest",
+              "authMode": "cookie", "pageURL": "https://aylaopenid.delonghigroup.com/", "gmid": gmid, "ucid": ucid,
+              "sdkBuild": SDK_BUILD, "format": "json"},
+    ).json()
+    
+    if login_response.get("errorCode", 0) != 0:
+        raise ValueError(f"Login failed: {login_response.get('errorMessage')}")
+        
+    login_token = login_response["sessionInfo"]["login_token"]
+
+    user_info_response = requests.post(
+        "https://socialize.eu1.gigya.com/socialize.getUserInfo",
+        headers={"User-Agent": BROWSER_USER_AGENT},
+        data={"enabledProviders": "*", "APIKey": API_KEY, "sdk": "js_latest", "login_token": login_token,
+              "authMode": "cookie", "pageURL": "https://aylaopenid.delonghigroup.com/", "gmid": gmid, "ucid": ucid,
+              "sdkBuild": SDK_BUILD, "format": "json"},
+    ).json()
+    user_uid, user_uid_signature, user_signature_timestamp = user_info_response["UID"], user_info_response["UIDSignature"], user_info_response["signatureTimestamp"]
+
+    consent_response = requests.get(
+        f"https://aylaopenid.delonghigroup.com/OIDCConsentPage.php",
+        headers={"User-Agent": BROWSER_USER_AGENT},
+        params={"context": context, "clientID": CLIENT_ID, "scope": "openid+email+profile+UID+comfort+en+alexa",
+                "UID": user_uid, "UIDSignature": user_uid_signature, "signatureTimestamp": user_signature_timestamp},
+    ).text
+    signature = consent_response.split("const consentObj2Sig = '")[1].split("';")[0]
+
+    auth_continue_response = requests.get(
+        f"https://fidm.eu1.gigya.com/oidc/op/v1.0/{API_KEY}/authorize/continue",
+        headers={"User-Agent": BROWSER_USER_AGENT},
+        params={"context": context, "login_token": login_token, "consent": json.dumps(
+            {"scope": "openid email profile UID comfort en alexa", "clientID": CLIENT_ID, "context": context,
+             "UID": user_uid, "consent": True}, separators=(",", ":")), "sig": signature, "gmidTicket": gmid_ticket},
+        allow_redirects=False,
+    )
+    code = get_query_param(auth_continue_response.headers["Location"], "code")
+
+    idp_token_response = requests.post(
+        f"https://fidm.eu1.gigya.com/oidc/op/v1.0/{API_KEY}/token",
+        headers={"User-Agent": BROWSER_USER_AGENT, "Authorization": AUTHORIZATION_HEADER,
+                 "Content-Type": "application/x-www-form-urlencoded"},
+        data={"code": code, "grant_type": "authorization_code", "redirect_uri": "https://google.it"},
+    ).json()
+    idp_token = idp_token_response["access_token"]
+
+    ayla_token_response = requests.post(
+        "https://user-field-eu.aylanetworks.com/api/v1/token_sign_in",
+        headers={"User-Agent": BROWSER_USER_AGENT},
+        data={"app_id": APP_ID, "app_secret": APP_SECRET, "token": idp_token},
+    ).json()
+    
+    if "refresh_token" not in ayla_token_response:
+        raise ValueError(f"Failed to get Ayla refresh token: {ayla_token_response}")
+
+    return ayla_token_response["refresh_token"]
+
 
 class CremalinkConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Cremalink."""
@@ -195,42 +299,59 @@ class CremalinkConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """
         errors = {}
         if user_input is not None:
-            refresh_token = user_input[CONF_REFRESH_TOKEN]
+            refresh_token = user_input.get(CONF_REFRESH_TOKEN)
+            email = user_input.get(CONF_EMAIL)
+            password = user_input.get(CONF_PASSWORD)
 
-            # Ensure token directory exists
-            token_dir = self.hass.config.path(TOKEN_DIR)
-            os.makedirs(token_dir, exist_ok=True)
+            if email and password:
+                try:
+                    refresh_token = await self.hass.async_add_executor_job(
+                        authenticate_with_email, email, password
+                    )
+                except Exception as e:
+                    _LOGGER.error("Email authentication failed: %s", e)
+                    errors["base"] = "auth_failed"
 
-            # Create a temporary token file
-            temp_file = os.path.join(token_dir, "temp_token.json")
-
-            try:
-                def _auth_and_fetch():
-                    with open(temp_file, "w") as f:
-                        json.dump({"refresh_token": refresh_token}, f)
-
-                    client = Client(temp_file)
-                    return client.get_devices()
-
-                self._discovered_devices = await self.hass.async_add_executor_job(_auth_and_fetch)
-                self._temp_token_file = temp_file
-
-                if not self._discovered_devices:
-                    errors["base"] = "no_devices"
-                else:
-                    return await self.async_step_cloud_device()
-
-            except Exception as e:
-                _LOGGER.error("Authentication failed: %s", e)
+            if not refresh_token and not errors:
                 errors["base"] = "auth_failed"
-                # Clean up if failed
-                if os.path.exists(temp_file):
-                    os.remove(temp_file)
+
+            if not errors and refresh_token:
+                # Ensure token directory exists
+                token_dir = self.hass.config.path(TOKEN_DIR)
+                os.makedirs(token_dir, exist_ok=True)
+
+                # Create a temporary token file
+                temp_file = os.path.join(token_dir, "temp_token.json")
+
+                try:
+                    def _auth_and_fetch():
+                        with open(temp_file, "w") as f:
+                            json.dump({"refresh_token": refresh_token}, f)
+
+                        client = Client(temp_file)
+                        return client.get_devices()
+
+                    self._discovered_devices = await self.hass.async_add_executor_job(_auth_and_fetch)
+                    self._temp_token_file = temp_file
+
+                    if not self._discovered_devices:
+                        errors["base"] = "no_devices"
+                    else:
+                        return await self.async_step_cloud_device()
+
+                except Exception as e:
+                    _LOGGER.error("Authentication failed: %s", e)
+                    errors["base"] = "auth_failed"
+                    # Clean up if failed
+                    if os.path.exists(temp_file):
+                        os.remove(temp_file)
 
         return self.async_show_form(
             step_id="cloud_auth",
             data_schema=vol.Schema({
-                vol.Required(CONF_REFRESH_TOKEN): str,
+                vol.Optional(CONF_EMAIL): str,
+                vol.Optional(CONF_PASSWORD): str,
+                vol.Optional(CONF_REFRESH_TOKEN): str,
             }),
             errors=errors,
         )
